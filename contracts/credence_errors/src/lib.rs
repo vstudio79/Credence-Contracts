@@ -21,7 +21,7 @@
 // use format!/write! for diagnostics).
 #![cfg_attr(not(test), deny(clippy::disallowed_macros))]
 
-use soroban_sdk::contracterror;
+use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Env};
 /// Project-wide version constant.
 pub const VERSION: &str = "0.1.0";
 
@@ -158,7 +158,7 @@ pub enum ContractError {
     /// Raised by `require_no_ongoing_migration`.
     /// Contracts: bond
     /// Wire-stable: do not renumber this error code.
-    MigrationInProgress = 125,
+    MigrationInProgress = 124,
 
     /// Borrows are currently frozen; new bond creation and top-ups are not allowed.
     /// Contracts: bond
@@ -433,7 +433,15 @@ pub enum ContractError {
     /// Triggered by: token ingress symbol check
     /// Contracts: bond
     /// Wire-stable: do not renumber this error code.
-    InvalidCurrency = 232,
+    InvalidCurrency = 234,
+
+    /// User-supplied raw Bytes input exceeds the maximum accepted length.
+    /// Raised by `require_finite_bytes` at entrypoint boundaries that accept
+    /// caller-controlled `Bytes` (e.g. idempotency salts) to bound hashing
+    /// cost and persistent-storage growth before the value is used.
+    /// Contracts: bond, general-purpose
+    /// Wire-stable: do not renumber this error code.
+    BytesTooLarge = 239,
 
     // --- Attestation (300-399) ---
     /// An attestation already exists from this attester for this bond.
@@ -670,16 +678,15 @@ pub enum ContractError {
     /// Wire-stable: do not renumber this error code.
     InvalidMaxPauseSigners = 119,
 
+    /// Cross-contract caller does not match the configured partner address.
+    /// Contracts: general-purpose
+    /// Wire-stable: do not renumber this error code.
+    CrossContractCallerMismatch = 123,
+
     /// Registering another pause signer would exceed the configured cap.
     /// Contracts: multisig
     /// Wire-stable: do not renumber this error code.
-    RoleNotHeldAtLedger = 116,
-
-    /// Signature or operation deadline has passed.
-    /// Replaces: panic!("signature expired")
-    /// Contracts: bond, delegation
-    /// Wire-stable: do not renumber this error code.
-    SignatureExpired = 222,
+    MaxPauseSignersExceeded = 125,
 
     // --- Treasury (600-699) ---
     /// Amount argument must be strictly positive (> 0).
@@ -1310,6 +1317,32 @@ impl ErrorExt for ContractError {
 
 
             ContractError::InvalidPercentSplit => true, // caller can provide valid splits
+
+            // --- General-purpose guards (123-129) ---
+            ContractError::InvalidMaxPauseSigners => true,   // supply 0 < cap <= hard cap
+            ContractError::MaxPauseSignersExceeded => true,  // remove a signer or raise the cap
+            ContractError::RoleRequired => true,             // caller can acquire the role
+            ContractError::ZeroBytes32 => true,              // supply a non-zero value
+            ContractError::TimestampInFuture => true,        // re-sign with a valid ledger time
+            ContractError::LeaseScopeMismatch
+            | ContractError::LeaseExpired
+            | ContractError::LeaseSignerMismatch => true,    // obtain/refresh a matching lease, then retry
+
+            // --- Stale epoch / snapshot / data binding: same payload will fail again. ---
+            ContractError::StaleAdminEpoch
+            | ContractError::StaleSignerEpoch
+            | ContractError::SnapshotGenerationMismatch => false,
+
+            // --- Cooldown / serialization input: caller-fixable. ---
+            ContractError::CooldownPeriodNotElapsed => true,      // wait for the window, then retry
+            ContractError::CooldownRequestAlreadyPending => true, // idempotent request already recorded
+            ContractError::CooldownRequestNotFound => true,       // supply a valid request id
+            ContractError::InvalidStringifiedBytes => true,       // supply well-formed bytes
+
+            // --- Flash-loan / cross-contract security halts: investigate, do not retry. ---
+            ContractError::InvalidFlashLoanCallback
+            | ContractError::FlashLoanRepaymentFailed
+            | ContractError::CrossContractCallerMismatch => false,
 
             // --- Arithmetic (700-799): code-level impossibility. ---
             ContractError::Overflow

@@ -64,6 +64,10 @@ pub enum ArbitrationError {
     /// Dispute is still active (Open, Voting, or Resolving).
     /// Used to block operations that require the dispute to be inactive or resolved.
     DisputeActive = 17,
+    /// The creator already has an unresolved (active) dispute in flight.
+    /// Triggered by: `create_dispute` when a previous dispute for the same
+    /// creator is still Open, Voting, or Resolving.
+    OngoingDispute = 18,
 }
 
 /// Assert a status transition is valid, returning ArbitrationError::InvalidTransition otherwise.
@@ -134,16 +138,19 @@ pub fn require_kept_promise(promised: u32, actual: u32) -> Result<(), Arbitratio
 pub fn require_dispute_resolved(status: &DisputeStatus) -> Result<(), ArbitrationError> {
     match status {
         DisputeStatus::Resolved | DisputeStatus::Cancelled | DisputeStatus::Tied => Ok(()),
-        DisputeStatus::Open | DisputeStatus::Voting | DisputeStatus::Resolving => {
-            Err(ArbitrationError::DisputeActive)
-        }
+        DisputeStatus::Open
+        | DisputeStatus::Voting
+        | DisputeStatus::Resolving
+        | DisputeStatus::Archived => Err(ArbitrationError::DisputeActive),
     }
 }
 
-
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    use std::vec;
+    use std::vec::Vec;
 
     // ============================================================================
     // Tests for: require_transition
@@ -913,9 +920,7 @@ mod tests {
             let to = DisputeStatus::Voting;
 
             // Simulate multiple concurrent checks
-            let results: Vec<_> = (0..10)
-                .map(|_| require_transition(from, to))
-                .collect();
+            let results: Vec<_> = (0..10).map(|_| require_transition(from, to)).collect();
 
             // All results must be identical
             assert!(results.iter().all(|r| r == &Ok(())));
@@ -940,9 +945,7 @@ mod tests {
             let status = DisputeStatus::Resolved;
 
             // Simulate multiple concurrent checks
-            let results: Vec<_> = (0..10)
-                .map(|_| require_dispute_resolved(&status))
-                .collect();
+            let results: Vec<_> = (0..10).map(|_| require_dispute_resolved(&status)).collect();
 
             // All results must be identical
             assert!(results.iter().all(|r| r == &Ok(())));
@@ -1107,8 +1110,8 @@ mod tests {
                     let result = require_transition(*from, *to);
                     // Every transition must be either Ok or InvalidTransition
                     match result {
-                        Ok(()) => {}, // valid
-                        Err(ArbitrationError::InvalidTransition) => {}, // invalid
+                        Ok(()) => {}                                   // valid
+                        Err(ArbitrationError::InvalidTransition) => {} // invalid
                         Err(e) => panic!("Unexpected error: {:?}", e),
                     }
                 }

@@ -838,6 +838,15 @@ impl CredenceArbitration {
             .instance()
             .set(&DataKey::Dispute(dispute_id), &dispute);
 
+        // Re-establish the creator's active-dispute guard. Resolving a dispute
+        // clears this marker, so a reopened dispute would otherwise leave the
+        // creator free to open a second concurrent dispute, defeating the
+        // one-active-dispute-per-creator invariant enforced by create_dispute.
+        e.storage().instance().set(
+            &DataKey::ActiveDispute(dispute.creator.clone()),
+            &dispute_id,
+        );
+
         // Clear vote tracking data for the reopened dispute
         let voter_counter_key = DataKey::VoterCounter(dispute_id);
         e.storage().instance().remove(&voter_counter_key);
@@ -846,6 +855,38 @@ impl CredenceArbitration {
 
         // Clear VoterCasted entries for all registered arbitrators
         let registry: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::ArbitratorRegistry)
+            .unwrap_or_else(|| Vec::new(&e));
+        for addr in registry.iter() {
+            let voter_casted_key = DataKey::VoterCasted(dispute_id, addr);
+            e.storage().instance().remove(&voter_casted_key);
+        }
+        e.events().publish(
+            (Symbol::new(&e, "dispute_reopened"), dispute_id),
+            from as u32,
+        );
+        e.events().publish(
+            (Symbol::new(&e, "status_transition"), dispute_id),
+            (from as u32, DisputeStatus::Voting as u32),
+        );
+        Ok(())
+    }
+
+    /// Transfer administrative control to a new address.
+    ///
+    /// # Invariants
+    ///
+    /// - Requires authorization from the current admin. Non-admin callers are
+    ///   rejected before any state is mutated, so a failed transfer leaves the
+    ///   previous admin fully in control.
+    /// - The replacement is atomic: the old admin loses all privileges the
+    ///   moment the new admin is written, and there is never an intermediate
+    ///   state in which neither address holds control.
+    pub fn transfer_admin(e: Env, new_admin: Address) {
+        bump_instance_ttl(&e);
+        let admin: Address = e
             .storage()
             .instance()
             .get(&DataKey::Admin)
@@ -861,8 +902,7 @@ impl CredenceArbitration {
     }
 }
 
-#[contractimpl]
-impl interfaces::governable::Governable for ArbitrationContract {
+impl interfaces::governable::Governable for CredenceArbitration {
     fn get_admin(e: Env) -> Address {
         e.storage()
             .instance()
